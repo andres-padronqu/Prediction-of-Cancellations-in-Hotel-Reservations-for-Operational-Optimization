@@ -13,7 +13,7 @@ A través de técnicas de **Machine Learning**, se analizan los factores clave q
 
 ---
 
-## 📊 Metodología
+## Metodología
 1. **Análisis exploratorio de datos (EDA)**  
    - Distribución de variables  
    - Correlaciones clave  
@@ -49,7 +49,3 @@ A través de técnicas de **Machine Learning**, se analizan los factores clave q
 - Desarrollar una interfaz simple para que usuarios no técnicos puedan usar el predictor.  
 
 ---
-
-## 👤 Autor
-**Andrés Padrón Quintana**  
-Estudiante de Actuaría y Ciencia de Datos @ ITAM  
