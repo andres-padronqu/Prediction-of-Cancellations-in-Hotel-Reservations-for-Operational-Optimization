@@ -1,0 +1,386 @@
+---
+title: "FINAL PROJECT"
+author: "Andrés Padrón Quintana"
+date: "2025-05-05"
+output: pdf_document
+---
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(corrplot)
+library(randomForest)
+library(glmnet)
+library(ROSE)
+```
+
+# ¿Qué factores influyen más en la cancelación de reservas y cómo puede el hotel reducir su tasa de cancelación?
+
+## Objetivos:
+-- Identificar los factores que predicen cancelaciones de reservas.
+
+-- Proponer estrategias basadas en datos para reducir cancelaciones.
+
+-- Diseñar un modelo predictivo que ayude a anticipar cancelaciones para permitir que el hotel optimice su ocupación y aumente sus ingresos.
+
+## Dataset
+Extraído de: https://www.kaggle.com/datasets/mojtaba142/hotel-booking
+Este dataset de Kaggle proporciona información detallada sobre las reservas realizadas en dos tipos de hoteles: City Hotel y Resort Hotel.
+Total de registros: 119,390
+Total de variables: 36
+
+# 1. ANÁLISIS EXPLORATORIO DE DATOS
+
+```{r}
+# Load dataset
+dataset <- read.csv('/Users/andrespadronquintana/Desktop/FIN CORP AV/FINAL/hotel_booking.csv')
+
+# Convert 'is_canceled' to a factor
+dataset <- dataset %>%
+  mutate(is_canceled = as.factor(is_canceled))
+
+# Summary and structure of the dataset
+summary(dataset)
+str(dataset)
+```
+```{r}
+# Visualizations
+ggplot(dataset, aes(x = is_canceled)) +
+  geom_bar(fill = "#69b3a2") +
+  labs(title = "Distribución de Cancelaciones de Reservas",
+       x = "Cancelación (0 = No Cancelado, 1 = Cancelado)",
+       y = "Cantidad de Reservas")
+```
+
+La gráfica muestra que aproximadamente el 37% de las reservas fueron canceladas (is_canceled = 1). Esto indica que las cancelaciones son un problema significativo para el hotel.
+Esta proporción sugiere que hay suficiente información para identificar patrones que permitan predecir y prevenir futuras cancelaciones.
+
+```{r}
+ggplot(dataset, aes(x = hotel, fill = is_canceled)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Cancelaciones por Tipo de Hotel",
+       x = "Tipo de Hotel",
+       y = "Cantidad de Reservas",
+       fill = "Cancelado")
+```
+Se observa que los City Hotels tienen una mayor proporción de cancelaciones en comparación con los Resort Hotels.
+Esto podría deberse a que los hoteles urbanos suelen tener reservas más impulsivas o con menor planificación, mientras que los resorts suelen ser reservados con mayor anticipación.
+
+```{r}
+# Convertir is_canceled a factor para el gráfico
+dataset$is_canceled <- factor(dataset$is_canceled, labels = c("Not Canceled", "Canceled"))
+
+# Histograma superpuesto
+ggplot(dataset, aes(x = lead_time, fill = is_canceled)) +
+  geom_histogram(position = "identity", alpha = 0.5, bins = 50) +
+  scale_fill_manual(values = c("#69b3a2", "#404080")) +
+  labs(title = "Lead Time Distribution by Cancellation Status",
+       x = "Lead Time (days)",
+       y = "Count",
+       fill = "Reservation Status") +
+  theme_minimal()
+```
+La gráfica revela que las reservas que se cancelan tienden a tener un lead time considerablemente mayor en comparación con las reservas que no se cancelan.
+Esto sugiere que las reservas hechas con mucha antelación tienen una mayor probabilidad de cancelación, lo que podría estar relacionado con cambios en los planes de viaje o reservas de contingencia.
+
+# 2. LIMPIEZA DE DATOS
+
+```{r}
+# Data preprocessing
+
+# Impute missing values in 'children' with the median
+dataset <- dataset %>%
+  mutate(children = ifelse(is.na(children), median(children, na.rm = TRUE), children))
+
+# Remove columns with too many missing values ('company' and 'agent')
+dataset <- dataset %>% dplyr::select(!company, !agent)
+
+# Remove columns with low significance
+dataset <- dataset %>% dplyr::select(-name, -email, -phone.number, -credit_card)
+
+# Handle categorical data (convert character columns to factors)
+dataset <- dataset %>% mutate(across(where(is.character), as.factor))
+
+# Remove outliers in 'lead_time'
+dataset <- dataset %>% filter(lead_time <= quantile(lead_time, 0.99))
+
+# Create new variables
+dataset <- dataset %>%
+  mutate(total_stays = stays_in_weekend_nights + stays_in_week_nights,
+         total_guests = adults + children + babies)
+
+# Inspect the dataset after cleaning
+dim(dataset)
+summary(dataset)
+
+```
+
+```{r}
+# Visualize the new 'total_stays' variable
+ggplot(dataset, aes(x = total_stays, fill = is_canceled)) +
+  geom_histogram(binwidth = 1, position = "dodge", alpha = 0.7) +
+  labs(title = "Distribución de Estancia Total por Cancelación",
+       x = "Total de Noches de Estancia",
+       y = "Cantidad de Reservas",
+       fill = "Cancelado")
+```
+
+```{r}
+# Visualize the new 'total_guests' variable
+ggplot(dataset, aes(x = total_guests, fill = is_canceled)) +
+  geom_histogram(binwidth = 1, position = "dodge", alpha = 0.7) +
+  labs(title = "Distribución de Total de Huéspedes por Cancelación",
+       x = "Total de Huéspedes",
+       y = "Cantidad de Reservas",
+       fill = "Cancelado")
+```
+
+Valores eliminados
+
+*   company y agent: tienen demasiados valores nulos
+*   arrival_date_:Dado que lead_time ya captura el comportamiento temporal
+*    arrival_date_:Dado que lead_time ya captura el comportamiento temporal
+*    country: poco influyente si no se agrupan los países por región
+
+# 3. MODELOS
+```{r}
+# Análisis de correlación
+numeric_cols <- dataset %>% select_if(is.numeric)
+corr_matrix <- cor(numeric_cols, use = "complete.obs")
+
+# Visualización de la matriz de correlación
+corrplot(corr_matrix, method = "circle", type = "upper", tl.cex = 0.8, tl.col = "black")
+
+# Identificación de variables clave
+important_vars <- c('lead_time', 'deposit_type', 'customer_type', 'market_segment')
+
+```
+
+**Correlaciones más relevantes:**
+
+* total_stays y total_guests presentan una correlación positiva fuerte, lo que es lógico, ya que ambas variables dependen del número de huéspedes y noches de estancia.
+
+* lead_time muestra una correlación débil con otras variables, pero puede tener un impacto importante en la cancelación debido a la naturaleza del negocio hotelero.
+adults, children y babies tienen una fuerte correlación con total_guests, lo que también es esperable.
+
+**Variables con alta multicolinealidad (valores cercanos a +1 o -1):**
+
+* total_stays y total_guests están muy correlacionadas. Esto sugiere que incluir ambas en el modelo puede generar redundancia. Es recomendable dejar solo una de estas.
+
+* stays_in_weekend_nights y stays_in_week_nights están relacionadas, por lo que puedes combinar estas dos en una sola variable (total_stays).
+
+**Correlaciones débiles:**
+
+
+* Variables como arrival_date_year o arrival_date_week_number muestran una correlación débil con el resto. Esto indica que no tienen un impacto fuerte en las demás variables numéricas.
+
+## Random Forest
+
+```{r}
+# ===============================
+# Paso 1: Cargar el dataset original
+# ===============================
+dataset <- read.csv('/Users/andrespadronquintana/Desktop/FIN CORP AV/FINAL/hotel_booking.csv')
+# ===============================
+# Paso 2: Verificar variable objetivo
+# ===============================
+table(dataset$is_canceled, useNA = "always")  # Asegúrate de ver 0s y 1s
+
+# ===============================
+# Paso 3: Crear variables derivadas (si no lo hiciste antes)
+# ===============================
+dataset$total_stays <- dataset$stays_in_weekend_nights + dataset$stays_in_week_nights
+
+# ===============================
+# Paso 4: Seleccionar variables clave
+# ===============================
+important_vars <- c('lead_time', 'total_stays', 'booking_changes',
+                    'previous_cancellations', 'hotel', 'deposit_type', 'is_canceled')
+
+dataset <- dataset %>% select(all_of(important_vars))
+
+# ===============================
+# Paso 5: Limpieza y preparación
+# ===============================
+dataset <- na.omit(dataset)  # Elimina filas con NA
+dataset$is_canceled <- as.factor(dataset$is_canceled)  # Asegura que sea factor
+table(dataset$is_canceled)  # Verifica que haya al menos 2 niveles
+
+# ===============================
+# Paso 6: Partición de entrenamiento y prueba
+# ===============================
+set.seed(123)
+trainIndex <- createDataPartition(dataset$is_canceled, p = 0.7, list = FALSE)
+trainData <- dataset[trainIndex, ]
+testData <- dataset[-trainIndex, ]
+
+# ===============================
+# Paso 7: Entrenamiento Random Forest
+# ===============================
+library(randomForest)
+rf_model <- randomForest(is_canceled ~ ., data = trainData, ntree = 100, mtry = 3, importance = TRUE)
+
+# ===============================
+# Paso 8: Predicciones y evaluación
+# ===============================
+testData$predictions <- predict(rf_model, testData)
+
+library(caret)
+conf_matrix <- confusionMatrix(as.factor(testData$predictions),
+                               as.factor(testData$is_canceled),
+                               positive = "1")
+print(conf_matrix)
+
+# ===============================
+# Paso 9: Importancia de variables
+# ===============================
+varImpPlot(rf_model)
+
+```
+**Análisis**
+
+
+
+*   Accuracy: 0.7739 , el modelo tiene una precisión moderada, es decir, clasifica correctamente cerca del 77% de los datos.
+*   Kappa: 0.4452,  indica la concordancia del modelo considerando el azar. Este valor sugiere una concordancia moderada.
+
+*   Sensitivity: 0.4010, el modelo solo detecta el 40.10% de las cancelaciones reales, indicando que le cuesta predecir cancelaciones.
+
+*   Specificity: 0.9898 , el modelo tiene un alto desempeño en detectar reservas no canceladas.
+
+## Logit y Probit
+```{r}
+# Cargar librerías necesarias
+library(tidyverse)
+library(caret)
+library(glmnet)   # Para el modelo LASSO
+library(MASS)     # Para el modelo Probit
+
+# Verifica que las columnas estén correctamente en el dataset
+colnames(dataset)
+
+# Selección de variables clave junto con la variable objetivo
+variables_clave <- c('lead_time', 'total_stays', 'booking_changes',
+                     'previous_cancellations', 'hotel',
+                     'deposit_type', 'is_canceled')
+
+# Selección correcta usando corchetes
+dataset <- dataset[, variables_clave]
+
+# Dividir los datos en entrenamiento y prueba
+set.seed(123)
+trainIndex <- createDataPartition(dataset$is_canceled, p = 0.7, list = FALSE)
+trainData <- dataset[trainIndex, ]
+testData <- dataset[-trainIndex, ]
+
+# ------------------------------
+#  Modelo Logit
+# ------------------------------
+log_model <- glm(is_canceled ~ ., data = trainData, family = binomial)
+log_predictions <- predict(log_model, testData, type = "response")
+testData$log_predictions <- ifelse(log_predictions > 0.5, 1, 0)
+
+# Evaluación del modelo Logit
+log_conf_matrix <- confusionMatrix(as.factor(testData$log_predictions),
+                                   as.factor(testData$is_canceled))
+print("Matriz de Confusión - Modelo Logit")
+print(log_conf_matrix)
+
+# ------------------------------
+#  Modelo Probit
+# ------------------------------
+probit_model <- glm(is_canceled ~ ., data = trainData, family = binomial(link = "probit"))
+probit_predictions <- predict(probit_model, testData, type = "response")
+testData$probit_predictions <- ifelse(probit_predictions > 0.5, 1, 0)
+
+# Evaluación del modelo Probit
+probit_conf_matrix <- confusionMatrix(as.factor(testData$probit_predictions),
+                                      as.factor(testData$is_canceled))
+print("Matriz de Confusión - Modelo Probit")
+print(probit_conf_matrix)
+
+```
+## LASSO
+```{r}
+# --- Preparación de datos para LASSO ---
+library(glmnet)
+
+# Filtrar factores con menos de 2 niveles (evita errores de contraste)
+factores_con_un_nivel <- sapply(dataset, function(x) is.factor(x) && nlevels(x) <= 1)
+dataset <- dataset[, !factores_con_un_nivel]
+
+# Verifica que la variable respuesta esté bien codificada como numérica binaria
+dataset$is_canceled <- as.numeric(as.character(dataset$is_canceled))  # debe ser 0/1
+
+# Crear matriz de diseño y vector respuesta
+x <- model.matrix(is_canceled ~ ., data = dataset)[, -1]  # Eliminamos la constante
+y <- dataset$is_canceled
+
+# --- Entrenamiento del modelo LASSO ---
+set.seed(123)
+lasso_model <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+
+# --- Resultados ---
+plot(lasso_model)  # curva de validación cruzada
+coef(lasso_model, s = "lambda.min")  # coeficientes del modelo óptimo
+
+```
+
+**Factores que influyen en la cancelación de reservas**
+
+Con base en los resultados obtenidos y el análisis de importancia de variables (como se observó en el gráfico de importancia del modelo Random Forest), los factores que tienen mayor influencia en la cancelación de reservas son:
+
+* deposit_type (Tipo de depósito)
+
+Las reservas con depósito "Non Refund" tienen una probabilidad significativamente menor de cancelación, ya que los clientes tienen un mayor compromiso financiero desde el inicio.
+Acción recomendada: El hotel puede incentivar el uso de depósitos no reembolsables mediante descuentos u ofertas atractivas para fomentar este tipo de reservas.
+
+* previous_cancellations (Cancelaciones previas)
+
+Los clientes con un historial de cancelaciones tienden a cancelar nuevamente.
+Acción recomendada: El hotel podría implementar restricciones o condiciones adicionales para clientes con un alto número de cancelaciones previas, como solicitar un anticipo o limitar la flexibilidad en cambios.
+
+* lead_time (Tiempo de anticipación en la reserva)
+
+Las reservas realizadas con mucha anticipación tienen mayor riesgo de cancelación.
+Acción recomendada: Implementar políticas de cancelación escalonadas, donde las penalizaciones aumenten conforme se acerque la fecha del check-in, podría reducir el número de cancelaciones tardías.
+
+* total_stays (Duración total de la estancia)
+
+Reservas de mayor duración tienen menor probabilidad de cancelación.
+Acción recomendada: Ofrecer incentivos para estancias más largas, como descuentos progresivos, puede ayudar a reducir las cancelaciones.
+
+* booking_changes (Cambios en la reserva)
+
+Un mayor número de modificaciones en la reserva está relacionado con mayor probabilidad de cancelación.
+Acción recomendada: Establecer límites razonables en la cantidad de cambios permitidos o cobrar una tarifa por modificaciones excesivas podría desalentar este comportamiento.
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Obtener la importancia como dataframe
+importance_df <- as.data.frame(importance(rf_model))
+importance_df$Variable <- rownames(importance_df)
+
+# Seleccionar y ordenar por MeanDecreaseGini
+top_vars <- importance_df %>%
+  arrange(desc(MeanDecreaseGini)) %>%
+  slice(1:6) # top 6 variables
+
+# Graficar
+ggplot(top_vars, aes(x = reorder(Variable, MeanDecreaseGini), y = MeanDecreaseGini)) +
+  geom_col(fill = "#69b3a2") +
+  coord_flip() +
+  labs(title = "Importancia de Variables en Random Forest",
+       x = "Variable",
+       y = "Importancia (MeanDecreaseGini)") +
+  theme_minimal(base_size = 14)
+
+
+```
+
